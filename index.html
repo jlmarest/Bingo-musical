@@ -1,16 +1,17 @@
-
 <!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="utf-8"/>
-  <title>Bingo musical Spotify (PKCE)</title>
+  <title>Bingo musical (Spotify Web Playback SDK + PKCE)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <style>
-    body { font-family: system-ui, Arial; margin: 20px; }
+    body { font-family: system-ui, Arial, sans-serif; margin: 20px; }
+    h1 { margin-top: 0; }
     label { display:block; margin:6px 0; }
-    input { width: 100%; max-width: 520px; padding:8px; }
+    input { width: 100%; max-width: 560px; padding:8px; }
     button { padding: 10px 16px; margin: 8px 6px 8px 0; }
-    pre { background:#f5f5f5; padding:10px; max-height:240px; overflow:auto; }
+    pre { background:#f5f5f5; padding:10px; max-height:260px; overflow:auto; white-space:pre-wrap; }
+    small { color:#555; }
   </style>
 </head>
 <body>
@@ -20,7 +21,7 @@
     <input id="clientId" placeholder="tu_client_id">
   </label>
   <label>Redirect URI:
-    <input id="redirectUri" placeholder="https://tuusuario.github.io/tu-repo/">
+    <input id="redirectUri" placeholder="https://jlmarest.github.io/Bingo-musical/">
   </label>
   <button id="loginBtn">Iniciar sesión en Spotify</button>
 
@@ -33,6 +34,9 @@
     <button id="loadPlaylistBtn">Cargar playlist</button>
     <button id="startBingoBtn">Empezar bingo</button>
     <button id="downloadLogBtn">Descargar log (CSV)</button>
+  </div>
+
+  <div>
     <button id="activateAudioBtn">Activar audio (si no suena)</button>
     <button id="useThisDeviceBtn">Usar este dispositivo</button>
     <button id="listarDevicesBtn">Listar dispositivos</button>
@@ -40,13 +44,18 @@
 
   <pre id="log"></pre>
 
-  <script src="https://sdk.scdn.co/r.js"></script>
+  <!-- Tu app: define TODO antes de cargar el SDK -->
   <script>
-    // === CONFIGURA ESTOS DOS VALORES CON LOS TUYOS ===
-    const DEFAULT_CLIENT_ID = 'f19b2716d1bb46ba98f7ff7c5bf3656c';
+    /**********************
+     * CONFIG POR DEFECTO *
+     **********************/
+    const DEFAULT_CLIENT_ID = 'f19b2716d1bb46ba98f7ff7c5bf3656c'
     const DEFAULT_REDIRECT_URI = 'https://jlmarest.github.io/Bingo-musical/';
+    const PLAYER_NAME = 'Bingo musical';
 
-    // ======= Estado global =======
+    /*****************
+     * ESTADO GLOBAL *
+     *****************/
     let token = null;
     let refreshToken = null;
     let tokenExpiry = 0;
@@ -69,7 +78,13 @@
     const logEl = document.getElementById('log');
     function appendLog(msg) { logEl.textContent += msg + "\n"; }
 
-    // ==== Utilidades PKCE ====
+    function getClientId(){ return (document.getElementById('clientId').value.trim() || DEFAULT_CLIENT_ID); }
+    function getRedirectUri(){ return (document.getElementById('redirectUri').value.trim() || DEFAULT_REDIRECT_URI); }
+    function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
+
+    /**************
+     * PKCE OAuth *
+     **************/
     function base64urlencode(arrayBuffer) {
       let str = btoa(String.fromCharCode.apply(null, new Uint8Array(arrayBuffer)));
       return str.replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
@@ -79,65 +94,45 @@
       const digest = await crypto.subtle.digest('SHA-256', enc);
       return digest;
     }
-    function randomString(len=64) {
-      const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
+    function randomString(len=64){
+      const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
       let out = '';
       const arr = new Uint32Array(len);
       crypto.getRandomValues(arr);
-      for (let i=0; i<len; i++) out += possible[arr[i] % possible.length];
+      for (let i=0;i<len;i++) out += chars[arr[i] % chars.length];
       return out;
     }
+    function saveAuthState(obj){ sessionStorage.setItem('auth_state', JSON.stringify(obj)); }
+    function readAuthState(){ try{ return JSON.parse(sessionStorage.getItem('auth_state')||'{}'); }catch{ return {} } }
 
-    // Guarda/lee estado en sessionStorage
-    function saveAuthState(obj) { sessionStorage.setItem('auth_state', JSON.stringify(obj)); }
-    function readAuthState() { try { return JSON.parse(sessionStorage.getItem('auth_state')||'{}'); } catch { return {} } }
-
-    async function ensureTokenValid() {
+    async function ensureTokenValid(){
       if (!token) return;
       const now = Date.now();
-      if (now < tokenExpiry - 5000) return; // aún válido
+      if (now < tokenExpiry - 5000) return;
       if (!refreshToken) return;
-      // Refresh token
-      const clientId = getClientId();
       const params = new URLSearchParams();
       params.set('grant_type','refresh_token');
       params.set('refresh_token', refreshToken);
-      params.set('client_id', clientId); // PKCE permite enviar client_id
+      params.set('client_id', getClientId());
       const res = await fetch('https://accounts.spotify.com/api/token', {
-        method: 'POST',
-        headers: { 'Content-Type':'application/x-www-form-urlencoded' },
+        method:'POST', headers:{ 'Content-Type':'application/x-www-form-urlencoded' },
         body: params.toString()
       });
-      if (!res.ok) { appendLog('Error al refrescar token: '+res.status); return; }
+      if (!res.ok){ appendLog('Error al refrescar token: ' + res.status); return; }
       const data = await res.json();
       token = data.access_token;
-      tokenExpiry = Date.now() + (data.expires_in*1000);
+      tokenExpiry = Date.now() + (data.expires_in * 1000);
       saveAuthState({ token, refreshToken, tokenExpiry });
       appendLog('Token renovado.');
     }
 
-    function getClientId() {
-      const v = document.getElementById('clientId').value.trim();
-      return v || DEFAULT_CLIENT_ID;
-    }
-    function getRedirectUri() {
-      const v = document.getElementById('redirectUri').value.trim();
-      return v || DEFAULT_REDIRECT_URI;
-    }
-
-    // ==== Paso A: iniciar login con PKCE
-    async function startLogin() {
+    async function startLogin(){
       const clientId = getClientId();
       const redirectUri = getRedirectUri();
-
-      // Generar verifier/challenge
       const codeVerifier = randomString(64);
       const codeChallenge = base64urlencode(await sha256(codeVerifier));
       const state = randomString(16);
-
-      // Guardar en session para el intercambio
       saveAuthState({ codeVerifier, state });
-
       const params = new URLSearchParams({
         client_id: clientId,
         response_type: 'code',
@@ -147,174 +142,211 @@
         scope: SCOPES.join(' '),
         state
       });
-
       window.location = `https://accounts.spotify.com/authorize?${params.toString()}`;
     }
 
-    // ==== Paso C: intercambio code -> token
-    async function handleRedirectBack() {
+    async function handleRedirectBack(){
       const url = new URL(window.location.href);
       const code = url.searchParams.get('code');
       const returnedState = url.searchParams.get('state');
       const error = url.searchParams.get('error');
-      if (error) {
-        appendLog('Error OAuth: ' + error);
-        return;
-      }
-      if (!code) return; // no venimos de OAuth
+      if (error){ appendLog('Error OAuth: '+error); return; }
+      if (!code) return;
 
       const { codeVerifier, state } = readAuthState();
-      if (!codeVerifier || returnedState !== state) {
-        appendLog('Estado OAuth inválido.');
-        return;
-      }
-
-      const clientId = getClientId();
-      const redirectUri = getRedirectUri();
+      if (!codeVerifier || state !== returnedState){ appendLog('Estado OAuth inválido.'); return; }
 
       const params = new URLSearchParams();
       params.set('grant_type','authorization_code');
       params.set('code', code);
-      params.set('redirect_uri', redirectUri);
-      params.set('client_id', clientId);
+      params.set('redirect_uri', getRedirectUri());
+      params.set('client_id', getClientId());
       params.set('code_verifier', codeVerifier);
 
       const res = await fetch('https://accounts.spotify.com/api/token', {
-        method: 'POST',
-        headers: { 'Content-Type':'application/x-www-form-urlencoded' },
+        method:'POST', headers:{ 'Content-Type':'application/x-www-form-urlencoded' },
         body: params.toString()
       });
-
-      if (!res.ok) {
-        appendLog('Error token endpoint: ' + res.status);
-        return;
-      }
+      if (!res.ok){ appendLog('Error token endpoint: '+res.status); return; }
 
       const data = await res.json();
       token = data.access_token;
       refreshToken = data.refresh_token || null;
-      tokenExpiry = Date.now() + (data.expires_in*1000);
+      tokenExpiry = Date.now() + (data.expires_in * 1000);
       saveAuthState({ token, refreshToken, tokenExpiry });
       appendLog('Autenticado.');
 
-      // Limpiar query (evitar repetir intercambio al refrescar)
+      // limpia la query
       history.replaceState({}, document.title, window.location.pathname);
     }
 
-    // ==== Spotify Web Playback SDK ====
+    /**********************
+     * CARGA DEL SDK (OK) *
+     **********************/
+    // Definimos el callback ANTES de insertar el script del SDK
     window.onSpotifyWebPlaybackSDKReady = () => {
+      appendLog('SDK cargado.');
+      initPlayer();
+    };
+
+    function loadSpotifySDK(){
+      if (document.getElementById('spotify-sdk')) return;
+      const s = document.createElement('script');
+      s.id = 'spotify-sdk';
+      s.src = 'https://sdk.scdn.co/spotify-player.js';
+      s.onload = () => { /* el SDK llamará a onSpotifyWebPlaybackSDKReady */ };
+      s.onerror = () => appendLog('Error cargando el SDK de Spotify.');
+      document.body.appendChild(s);
+    }
+
+    function initPlayer(){
+      if (!token){ appendLog('Aún no hay token; inicia sesión primero.'); return; }
+
       player = new Spotify.Player({
-        name: 'Bingo musical',
-        getOAuthToken: async cb => {
-          await ensureTokenValid();
-          cb(token);
-        },
-        volume: 0.8
+        name: PLAYER_NAME,
+        getOAuthToken: async cb => { await ensureTokenValid(); cb(token); },
+        volume: 1.0
       });
-
-      player.addListener('ready', ({ device_id }) => {
-        deviceId = device_id;
-        appendLog('Dispositivo listo: '+deviceId);
-      });
-      player.addListener('initialization_error', ({ message }) => appendLog('Init error: '+message));
-      player.addListener('authentication_error', ({ message }) => appendLog('Auth error: '+message));
-      player.addListener('account_error', ({ message }) => appendLog('Account error: '+message));
-      player.addListener('playback_error', ({ message }) => appendLog('Playback error: '+message));
-
-      player.connect();
-      
-      // justo después de que el SDK diga "ready"
 
       player.addListener('ready', async ({ device_id }) => {
         deviceId = device_id;
         appendLog('Dispositivo listo: ' + deviceId);
-
-        
-      player.addListener('player_state_changed', (state) => {
-        if (!state) { appendLog('Estado: null (SDK no activo)'); return; }
-        const t = state.track_window.current_track;
-        appendLog(`Estado: ${state.paused ? 'Pausa':'Reproduciendo'} — ${t?.name || '(sin pista)'}`);
-      });
-
-        // Intenta activar audio y seleccionar el dispositivo desde el principio
-        try {
-          if (player.activateElement) { await player.activateElement(); }
-          await player.setVolume(1.0);
-        } catch {}
-
-        await transferPlayback(true);   // muy importante: play:true
-        appendLog('Playback transferido al Web Player (SDK).');
-
+        try { if (player.activateElement) await player.activateElement(); } catch {}
+        await transferPlayback(true); // “despierta” y fija este dispositivo
         // Diagnóstico: lista dispositivos
-        try {
-          const data = await api('me/player/devices');
-          const resumen = data.devices.map(d => `${d.name} [${d.type}] activo=${d.is_active}`).join(' | ');
-          appendLog('Dispositivos vistos: ' + resumen);
-        } catch {}
+        try { await listarDispositivos(); } catch {}
       });
-    };
 
+      player.addListener('not_ready', ({ device_id }) => {
+        appendLog('Dispositivo offline: ' + device_id);
+        if (deviceId === device_id) deviceId = null;
+      });
+
+      player.addListener('initialization_error', ({ message }) => appendLog('Init error: ' + message));
+      player.addListener('authentication_error', ({ message }) => appendLog('Auth error: ' + message));
+      player.addListener('account_error', ({ message }) => appendLog('Account error: ' + message));
+      player.addListener('playback_error', ({ message }) => appendLog('Playback error: ' + message));
+
+      player.addListener('player_state_changed', (state) => {
+        if (!state){ appendLog('Estado: null (SDK no activo)'); return; }
+        const t = state.track_window.current_track;
+        appendLog(`Estado: ${state.paused ? 'Pausa':'Reproduciendo'} — ${t?.name ?? '(sin pista)'}`);
+      });
+
+      player.connect().then(ok => appendLog('player.connect() => ' + ok));
+    }
+
+    /*****************
+     * API genérica  *
+     *****************/
     async function api(path, method='GET', body=null) {
       await ensureTokenValid();
       const res = await fetch(
         path.startsWith('http') ? path : `https://api.spotify.com/v1/${path}`,
-        {
-          method,
-          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-          body: body ? JSON.stringify(body) : null
-        }
+        { method, headers:{ 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : null }
       );
       if (!res.ok) throw new Error(`${path} => ${res.status}`);
       return res.json();
     }
 
-
-    async function transferPlayback(playNow = false) {
-      await ensureTokenValid();
-      const body = { device_ids: [deviceId], play: !!playNow };
-      const res = await fetch('https://api.spotify.com/v1/me/player', {
-        method: 'PUT',
-        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      });
-      if (!res.ok) {
-        appendLog('Transfer playback error: ' + res.status);
+    async function tryFetch(url, options, retries=3, backoff=500){
+      for (let i=0;i<retries;i++){
+        try{
+          const res = await fetch(url, options);
+          if (res.ok) return res;
+          appendLog(`Fetch fallo (${res.status}) en ${url}, intento ${i+1}/${retries}`);
+        }catch(e){
+          appendLog(`Fetch error en ${url}: ${e.message} (intento ${i+1}/${retries})`);
+        }
+        await sleep(backoff*(i+1));
       }
+      throw new Error('Failed to fetch: ' + url);
     }
 
+    async function listarDispositivos(){
+      const data = await api('me/player/devices');
+      const resumen = data.devices.map(d => `${d.name} [${d.type}] activo=${d.is_active} (id=${d.id})`).join(' | ');
+      appendLog('Dispositivos: ' + resumen);
+      return data.devices;
+    }
 
-    function parsePlaylistId(input) {
+    async function discoverSdkDeviceIdByName(name = PLAYER_NAME){
+      const devices = await listarDispositivos();
+      const sdk = devices.find(d => d.name === name);
+      if (sdk){ deviceId = sdk.id; appendLog('SDK device descubierto por API: ' + deviceId); return true; }
+      appendLog('SDK device no aparece en la lista.');
+      return false;
+    }
+
+    async function transferPlayback(playNow=false){
+      await ensureTokenValid();
+      if (!deviceId){
+        appendLog('No hay deviceId: intentando descubrirlo por API…');
+        const ok = await discoverSdkDeviceIdByName(PLAYER_NAME);
+        if (!ok){ appendLog('Transfer cancelado: sin deviceId.'); return; }
+      }
+      const res = await fetch('https://api.spotify.com/v1/me/player', {
+        method:'PUT',
+        headers:{ 'Authorization': `Bearer ${token}`, 'Content-Type':'application/json' },
+        body: JSON.stringify({ device_ids: [deviceId], play: !!playNow })
+      });
+      if (res.ok) appendLog('Playback transferido al Web Player (SDK).');
+      else appendLog('Transfer playback error: ' + res.status);
+    }
+
+    async function isSdkActive(){
+      try { const st = await player.getCurrentState(); return !!st; } catch { return false; }
+    }
+
+    async function playTrackUri(uri){
+      await ensureTokenValid();
+      const useSDK = await isSdkActive() && !!deviceId;
+      const qp = useSDK ? `?device_id=${deviceId}` : '';
+      await tryFetch(`https://api.spotify.com/v1/me/player/play${qp}`, {
+        method:'PUT',
+        headers:{ 'Authorization': `Bearer ${token}`, 'Content-Type':'application/json' },
+        body: JSON.stringify({ uris:[uri] })
+      }, 3, 500);
+    }
+
+    async function seekPosition(ms){
+      await ensureTokenValid();
+      const useSDK = await isSdkActive() && !!deviceId;
+      const url = `https://api.spotify.com/v1/me/player/seek?position_ms=${ms}` + (useSDK ? `&device_id=${deviceId}` : '');
+      await tryFetch(url, { method:'PUT', headers:{ 'Authorization': `Bearer ${token}` } }, 2, 500);
+    }
+
+    function parsePlaylistId(input){
       const v = (input||'').trim();
-      try {
-        if (v.includes('playlist')) {
+      try{
+        if (v.includes('playlist')){
           const u = new URL(v);
           const parts = u.pathname.split('/');
-          const idx = parts.findIndex(p => p === 'playlist');
+          const idx = parts.findIndex(p => p==='playlist');
           if (idx>=0 && parts[idx+1]) return parts[idx+1];
         }
-      } catch {}
+      }catch{}
       return v;
     }
 
-    async function loadPlaylist() {
-      if (!token) { appendLog('No estás autenticado.'); return; }
+    async function loadPlaylist(){
+      if (!token){ appendLog('No estás autenticado.'); return; }
+      tracks = [];
       const pid = parsePlaylistId(document.getElementById('playlistId').value);
       appendLog('Cargando playlist: ' + pid);
 
-      tracks = [];
-      // paginar
       let url = `https://api.spotify.com/v1/playlists/${pid}/tracks?fields=items(track(id,name,artists(name),uri)),next&limit=100`;
-      while (url) {
+      while (url){
         await ensureTokenValid();
-        const res = await fetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
+        const res = await fetch(url, { headers:{ 'Authorization': `Bearer ${token}` } });
         if (!res.ok) throw new Error(`API ${url} => ${res.status}`);
         const data = await res.json();
-        for (const item of data.items) {
-          if (item.track && item.track.id) {
+        for (const item of data.items){
+          if (item.track && item.track.id){
             tracks.push({
               id: item.track.id,
               name: item.track.name,
-              artists: item.track.artists.map(a => a.name).join(', '),
+              artists: item.track.artists.map(a=>a.name).join(', '),
               uri: `spotify:track:${item.track.id}`
             });
           }
@@ -326,147 +358,37 @@
       // CSV opcional
       const file = document.getElementById('segmentsCsv').files[0];
       segments = {};
-      if (file) {
+      if (file){
         const text = await file.text();
-        for (const line of text.split(/\r?\n/)) {
+        for (const line of text.split(/\r?\n/)){
           const [tid, start, end] = line.split(',');
           if (tid && start && end) segments[tid.trim()] = { start:+start, end:+end };
         }
         appendLog(`Segmentos cargados: ${Object.keys(segments).length}`);
-      } else {
+      }else{
         appendLog('Sin CSV: se usarán fragmentos simulados (15s desde 45s).');
       }
 
-      await transferPlayback();
-      appendLog('Playback transferido al Web Player.');
-    }
-
-    function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
-
-    async function tryFetch(url, options, retries=3, backoff=500) {
-      for (let i=0; i<retries; i++) {
-        try {
-          const res = await fetch(url, options);
-          if (res.ok) return res;
-          appendLog(`Fetch fallo (${res.status}) en ${url}, intento ${i+1}/${retries}`);
-        } catch (e) {
-          appendLog(`Fetch error en ${url}: ${e.message} (intento ${i+1}/${retries})`);
-        }
-        await sleep(backoff * (i+1));
-      }
-      throw new Error('Failed to fetch: ' + url);
-    }
-
-    async function playTrackUri(uri, useDevice=true) {
-      await ensureTokenValid();
-      const qp = (useDevice && deviceId) ? `?device_id=${deviceId}` : '';
-      await tryFetch(`https://api.spotify.com/v1/me/player/play${qp}`, {
-        method: 'PUT',
-        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ uris: [uri] })
-      }, 3, 500);
-    }
-
-    async function seekPosition(ms, useDevice=true) {
-      await ensureTokenValid();
-      const qp = (useDevice && deviceId) ? `&device_id=${deviceId}` : '';
-      await tryFetch(`https://api.spotify.com/v1/me/player/seek?position_ms=${ms}${qp}`, {
-        method: 'PUT',
-        headers: { 'Authorization': `Bearer ${token}` }
-      }, 2, 500);
+      // activa este dispositivo (si no lo está)
+      await transferPlayback(true);
     }
 
     function shuffle(a){
       const r = a.slice();
-      for (let i=r.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [r[i],r[j]]=[r[j],r[i]]; }
+      for (let i=r.length-1;i>0;i--){ const j = Math.floor(Math.random()*(i+1)); [r[i],r[j]]=[r[j],r[i]]; }
       return r;
     }
 
-    async function startBingo() {
-      if (!tracks.length) { appendLog('No hay pistas cargadas.'); return; }
+    async function startBingo(){
+      if (!tracks.length){ appendLog('No hay pistas cargadas.'); return; }
       const order = shuffle(tracks);
-      
-      // ¿Está activo el SDK?
-      let activeIsSDK = false;
-      try {
-        const state = await player.getCurrentState();
-        activeIsSDK = !!state;  // si es null, el SDK no es el activo
-      } catch {}
 
-      // Si no está activo, no pases device_id y controla el dispositivo activo (p.ej., Web Player oficial)
-      appendLog('Usando destino: ' + (activeIsSDK ? 'SDK (Bingo musical)' : 'dispositivo activo de Spotify'));
-
-
-      for (const t of order) {
-        const seg = segments[t.id] || { start:45, end:60 }; // simulación: 15s desde 00:45
+      for (const t of order){
+        const seg = segments[t.id] || { start:45, end:60 }; // 15s desde 00:45
         const startSec = seg.start, endSec = seg.end;
 
         appendLog(`▶ ${t.name} — ${t.artists} [${startSec}s → ${endSec}s]`);
         await playTrackUri(t.uri);
-        await sleep(1200);            // más margen para cargar
+        await sleep(1200);
         await seekPosition(startSec * 1000);
-
-        const durationMs = (endSec - startSec) * 1000;
-        await sleep(durationMs);
-
-        await tryFetch(`https://api.spotify.com/v1/me/player/pause?device_id=${deviceId}`, {
-          method: 'PUT',
-          headers: { 'Authorization': `Bearer ${token}` }
-        }, 2, 500);
-
-        logRows.push({ ts:new Date().toISOString(), track:t.name, artist:t.artists, start:startSec, end:endSec });
-      }
-      appendLog('Bingo completado.');
-    }
-
-    function downloadLogCsv(){
-      const header='timestamp,track,artist,start_sec,end_sec\n';
-      const rows = logRows.map(r => `${r.ts},"${r.track.replace(/"/g,'""')}","${r.artist.replace(/"/g,'""')}",${r.start},${r.end}`).join('\n');
-      const blob = new Blob([header+rows], { type:'text/csv;charset=utf-8;' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a'); a.href=url; a.download='bingo_log.csv'; a.click();
-      URL.revokeObjectURL(url);
-    }
-
-    // Eventos
-    document.getElementById('loginBtn').onclick = startLogin;
-    document.getElementById('loadPlaylistBtn').onclick = () => loadPlaylist().catch(e => appendLog(e.message));
-    document.getElementById('startBingoBtn').onclick = () => startBingo().catch(e => appendLog(e.message));
-    document.getElementById('downloadLogBtn').onclick = downloadLogCsv;
-
-    // Pre-rellenar campos
-    document.getElementById('clientId').value = DEFAULT_CLIENT_ID;
-    document.getElementById('redirectUri').value = DEFAULT_REDIRECT_URI;
-    
-    document.getElementById('activateAudioBtn').onclick = async () => {
-      try {
-        // Desbloquea el audio por política de autoplay
-        if (player && player.activateElement) {
-          await player.activateElement();
-        }
-        await player.setVolume(1.0);
-        appendLog('Audio activado y volumen al 100%.');
-      } catch(e) {
-        appendLog('activateElement/setVolume error: ' + e.message);
-      }
-    };
-
-    document.getElementById('useThisDeviceBtn').onclick = async () => {
-      await transferPlayback(true);  // play:true para “despertar” el dispositivo
-      appendLog('Este dispositivo fijado como destino.');
-    };
-
-    document.getElementById('listarDevicesBtn').onclick = async () => {
-      const data = await api('me/player/devices');
-      const resumen = data.devices.map(d => `${d.name} [${d.type}] activo=${d.is_active} (id=${d.id})`).join(' | ');
-      appendLog('Dispositivos: ' + resumen);
-    };
-
-
-    // Si venimos del OAuth, canjear code
-    handleRedirectBack().catch(e => appendLog(e.message));
-  </script>
-</body>
-</html>
-
 
