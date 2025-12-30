@@ -10,7 +10,7 @@
     label { display:block; margin:6px 0; }
     input { width: 100%; max-width: 560px; padding:8px; }
     button { padding: 10px 16px; margin: 8px 6px 8px 0; }
-    pre { background:#f5f5f5; padding:10px; max-height:260px; overflow:auto; white-space:pre-wrap; }
+    pre { background:#f5f5f5; padding:10px; max-height:300px; overflow:auto; white-space:pre-wrap; }
     small { color:#555; }
   </style>
 </head>
@@ -44,13 +44,12 @@
 
   <pre id="log"></pre>
 
-  <!-- Tu app: define TODO antes de cargar el SDK -->
   <script>
     /**********************
      * CONFIG POR DEFECTO *
      **********************/
-    const DEFAULT_CLIENT_ID = 'f19b2716d1bb46ba98f7ff7c5bf3656c'
-    const DEFAULT_REDIRECT_URI = 'https://jlmarest.github.io/Bingo-musical/';
+    const DEFAULT_CLIENT_ID = 'f19b2716d1bb46ba98f7ff7c5bf3656c';  // puedes cambiarlo si quieres
+    const DEFAULT_REDIRECT_URI = 'https://jlmarest.github.io/Bingo-musical/'; // debe coincidir 1:1 con Spotify App
     const PLAYER_NAME = 'Bingo musical';
 
     /*****************
@@ -77,7 +76,6 @@
 
     const logEl = document.getElementById('log');
     function appendLog(msg) { logEl.textContent += msg + "\n"; }
-
     function getClientId(){ return (document.getElementById('clientId').value.trim() || DEFAULT_CLIENT_ID); }
     function getRedirectUri(){ return (document.getElementById('redirectUri').value.trim() || DEFAULT_REDIRECT_URI); }
     function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
@@ -176,32 +174,21 @@
       saveAuthState({ token, refreshToken, tokenExpiry });
       appendLog('Autenticado.');
 
-      // limpia la query
+      // Limpia la query para evitar repetir el canje al refrescar
       history.replaceState({}, document.title, window.location.pathname);
     }
 
     /**********************
      * CARGA DEL SDK (OK) *
      **********************/
-    // Definimos el callback ANTES de insertar el script del SDK
+    // Definir el callback ANTES de cargar el script del SDK
     window.onSpotifyWebPlaybackSDKReady = () => {
       appendLog('SDK cargado.');
       initPlayer();
     };
 
-    function loadSpotifySDK(){
-      if (document.getElementById('spotify-sdk')) return;
-      const s = document.createElement('script');
-      s.id = 'spotify-sdk';
-      s.src = 'https://sdk.scdn.co/spotify-player.js';
-      s.onload = () => { /* el SDK llamará a onSpotifyWebPlaybackSDKReady */ };
-      s.onerror = () => appendLog('Error cargando el SDK de Spotify.');
-      document.body.appendChild(s);
-    }
-
     function initPlayer(){
       if (!token){ appendLog('Aún no hay token; inicia sesión primero.'); return; }
-
       player = new Spotify.Player({
         name: PLAYER_NAME,
         getOAuthToken: async cb => { await ensureTokenValid(); cb(token); },
@@ -212,8 +199,7 @@
         deviceId = device_id;
         appendLog('Dispositivo listo: ' + deviceId);
         try { if (player.activateElement) await player.activateElement(); } catch {}
-        await transferPlayback(true); // “despierta” y fija este dispositivo
-        // Diagnóstico: lista dispositivos
+        await transferPlayback(true); // fija este dispositivo como destino
         try { await listarDispositivos(); } catch {}
       });
 
@@ -355,7 +341,6 @@
       }
       appendLog(`Total pistas: ${tracks.length}`);
 
-      // CSV opcional
       const file = document.getElementById('segmentsCsv').files[0];
       segments = {};
       if (file){
@@ -369,7 +354,6 @@
         appendLog('Sin CSV: se usarán fragmentos simulados (15s desde 45s).');
       }
 
-      // activa este dispositivo (si no lo está)
       await transferPlayback(true);
     }
 
@@ -392,3 +376,50 @@
         await sleep(1200);
         await seekPosition(startSec * 1000);
 
+        await sleep((endSec - startSec) * 1000);
+
+        const useSDK = await isSdkActive() && !!deviceId;
+        const pauseUrl = `https://api.spotify.com/v1/me/player/pause` + (useSDK ? `?device_id=${deviceId}` : '');
+        await tryFetch(pauseUrl, { method:'PUT', headers:{ 'Authorization': `Bearer ${token}` } }, 2, 500);
+
+        logRows.push({ ts:new Date().toISOString(), track:t.name, artist:t.artists, start:startSec, end:endSec });
+      }
+      appendLog('Bingo completado.');
+    }
+
+    function downloadLogCsv(){
+      const header = 'timestamp,track,artist,start_sec,end_sec\n';
+      const rows = logRows.map(r => `${r.ts},"${r.track.replace(/"/g,'""')}","${r.artist.replace(/"/g,'""')}",${r.start},${r.end}`).join('\n');
+      const blob = new Blob([header+rows], { type:'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href=url; a.download='bingo_log.csv'; a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    /***********
+     * EVENTOS *
+     ***********/
+    document.getElementById('loginBtn').onclick = startLogin;
+    document.getElementById('loadPlaylistBtn').onclick = () => loadPlaylist().catch(e => appendLog(e.message));
+    document.getElementById('startBingoBtn').onclick = () => startBingo().catch(e => appendLog(e.message));
+    document.getElementById('downloadLogBtn').onclick = downloadLogCsv;
+
+    document.getElementById('activateAudioBtn').onclick = async () => {
+      try { if (player && player.activateElement) await player.activateElement(); await player.setVolume(1.0); appendLog('Audio activado.'); }
+      catch(e){ appendLog('activateElement/setVolume error: ' + e.message); }
+    };
+    document.getElementById('useThisDeviceBtn').onclick = async () => { await transferPlayback(true); appendLog('Este dispositivo fijado como destino.'); };
+    document.getElementById('listarDevicesBtn').onclick = async () => { try { await listarDispositivos(); } catch(e){ appendLog(e.message); } };
+
+    // Pre-rellenar
+    document.getElementById('clientId').value = DEFAULT_CLIENT_ID;
+    document.getElementById('redirectUri').value = DEFAULT_REDIRECT_URI;
+
+    // 1) Canjea token si venimos de OAuth
+    handleRedirectBack().catch(e => appendLog(e.message));
+  </script>
+
+  <!-- Cargar el SDK DESPUÉS de definir el callback -->
+  <script src="https://sdk.scdn.co/r.js</script>
+</body>
+</html>
