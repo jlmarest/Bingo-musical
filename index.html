@@ -219,6 +219,19 @@
       player.addListener('playback_error', ({ message }) => appendLog('Playback error: '+message));
 
       player.connect();
+      
+      // justo después de que el SDK diga "ready"
+      player.addListener('ready', async ({ device_id }) => {
+        deviceId = device_id;
+        appendLog('Dispositivo listo: ' + deviceId);
+
+        // Activa el Web Player y permite autoplay
+        await transferPlayback(true);
+
+        // (Opcional) intenta reproducir 1 segundo de silencio via resume (algunas versiones lo requieren)
+        try { await player.resume(); } catch (e) { /* ignora si no procede */ }
+      });
+
     };
 
     async function api(path, method='GET', body=null) {
@@ -235,14 +248,20 @@
       return res.json();
     }
 
-    async function transferPlayback() {
+
+    async function transferPlayback(playNow = false) {
       await ensureTokenValid();
-      await fetch('https://api.spotify.com/v1/me/player', {
+      const body = { device_ids: [deviceId], play: !!playNow };
+      const res = await fetch('https://api.spotify.com/v1/me/player', {
         method: 'PUT',
         headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ device_ids: [deviceId], play: false })
+        body: JSON.stringify(body)
       });
+      if (!res.ok) {
+        appendLog('Transfer playback error: ' + res.status);
+      }
     }
+
 
     function parsePlaylistId(input) {
       const v = (input||'').trim();
@@ -304,14 +323,25 @@
 
     function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
 
-    async function playTrackUri(uri){ 
-      await ensureTokenValid();
-      await fetch(`https://api.spotify.com/v1/me/player/play?device_id=${deviceId}`, {
-        method:'PUT',
-        headers:{ 'Authorization': `Bearer ${token}`, 'Content-Type':'application/json' },
-        body: JSON.stringify({ uris:[uri] })
-      });
+    async function tryFetch(url, options, retries=3, backoff=500) {
+      for (let i=0; i<retries; i++) {
+        const res = await fetch(url, options);
+        if (res.ok) return res;
+        appendLog(`Fetch fallo (${res.status}) en ${url}, intento ${i+1}/${retries}`);
+        await sleep(backoff * (i+1));
+      }
+      throw new Error('Failed to fetch '+url);
     }
+
+    async function playTrackUri(uri) {
+      await ensureTokenValid();
+      await tryFetch(`https://api.spotify.com/v1/me/player/play?device_id=${deviceId}`, {
+        method: 'PUT',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ uris: [uri] })
+      }, 3, 500);
+    }
+
 
     async function seekPosition(ms){
       await ensureTokenValid();
@@ -337,15 +367,16 @@
 
         appendLog(`▶ ${t.name} — ${t.artists} [${startSec}s → ${endSec}s]`);
         await playTrackUri(t.uri);
-        await sleep(900);
-        await seekPosition(startSec*1000);
+        await sleep(1200);            // más margen para cargar
+        await seekPosition(startSec * 1000);
 
-        await sleep((endSec-startSec)*1000);
-        await ensureTokenValid();
-        await fetch(`https://api.spotify.com/v1/me/player/pause?device_id=${deviceId}`, {
-          method:'PUT',
-          headers:{ 'Authorization': `Bearer ${token}` }
-        });
+        const durationMs = (endSec - startSec) * 1000;
+        await sleep(durationMs);
+
+        await tryFetch(`https://api.spotify.com/v1/me/player/pause?device_id=${deviceId}`, {
+          method: 'PUT',
+          headers: { 'Authorization': `Bearer ${token}` }
+        }, 2, 500);
 
         logRows.push({ ts:new Date().toISOString(), track:t.name, artist:t.artists, start:startSec, end:endSec });
       }
@@ -376,3 +407,4 @@
   </script>
 </body>
 </html>
+
