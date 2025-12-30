@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8"/>
+<title>SDK Test — Spotify Web Playback</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<style> body{font-family:system-ui,Arial;margin:20px} pre{background:#f5f5f5;padding:10px;max-height:240px;overflow:auto} </style>
+</head>
+<body>
+<h2>Prueba mínima del Web Playback SDK</h2>
+<button id="loginBtn">Iniciar sesión</button>
+<button id="listBtn">Listar dispositivos</button>
+<pre id="log"></pre>
+
+<script>
+const DEFAULT_CLIENT_ID = 'f19b2716d1bb46ba98f7ff7c5bf3656c';
+const DEFAULT_REDIRECT_URI = 'https://jlmarest.github.io/Bingo-musical/sdk-test.html';
+const SCOPES = ['streaming','user-read-email','user-read-private','user-read-playback-state','user-modify-playback-state'];
+let token=null, refreshToken=null, tokenExpiry=0, player=null, deviceId=null;
+const logEl=document.getElementById('log'); const log=(m)=>logEl.textContent+=m+"\n";
+
+function b64u(ab){ let s=btoa(String.fromCharCode.apply(null,new Uint8Array(ab))); return s.replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); }
+async function sha256(s){ return await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)); }
+function rand(n=64){ const c='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~'; let o=''; const a=new Uint32Array(n); crypto.getRandomValues(a); for(let i=0;i<n;i++) o+=c[a[i]%c.length]; return o; }
+function save(a){ sessionStorage.setItem('auth_state', JSON.stringify(a)); } function read(){ try{return JSON.parse(sessionStorage.getItem('auth_state')||'{}');}catch{return{}} }
+async function ensure(){ if(!token)return; const now=Date.now(); if(now<tokenExpiry-5000) return; if(!refreshToken) return;
+  const p=new URLSearchParams(); p.set('grant_type','refresh_token'); p.set('refresh_token',refreshToken); p.set('client_id',DEFAULT_CLIENT_ID);
+  const r=await fetch('https://accounts.spotify.com/api/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:p.toString()});
+  if(!r.ok){ log('refresh fail '+r.status); return; } const d=await r.json(); token=d.access_token; tokenExpiry=Date.now()+d.expires_in*1000; save({token,refreshToken,tokenExpiry}); log('Token renovado.');
+}
+async function startLogin(){
+  const ver=rand(64), chal=b64u(await sha256(ver)), st=rand(16); save({codeVerifier:ver,state:st});
+  const q=new URLSearchParams({client_id:DEFAULT_CLIENT_ID,response_type:'code',redirect_uri:DEFAULT_REDIRECT_URI,code_challenge_method:'S256',code_challenge:chal,scope:SCOPES.join(' '),state:st});
+  location.href='https://accounts.spotify.com/authorize?'+q.toString();
+}
+async function back(){
+  const u=new URL(location.href); const code=u.searchParams.get('code'); const state=u.searchParams.get('state'); const err=u.searchParams.get('error'); if(err){log('oauth error '+err);return;}
+  if(!code) return;
+  const {codeVerifier,state:st}=read(); if(!codeVerifier||state!==st){log('state mismatch');return;}
+  const p=new URLSearchParams({grant_type:'authorization_code',code,redirect_uri:DEFAULT_REDIRECT_URI,client_id:DEFAULT_CLIENT_ID,code_verifier:codeVerifier});
+  const r=await fetch('https://accounts.spotify.com/api/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:p.toString()});
+  if(!r.ok){ log('token error '+r.status); return; } const d=await r.json(); token=d.access_token; refreshToken=d.refresh_token||null; tokenExpiry=Date.now()+d.expires_in*1000; save({token,refreshToken,tokenExpiry}); log('Autenticado.');
+  history.replace
+}
