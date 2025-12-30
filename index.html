@@ -1,128 +1,242 @@
+
 <!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="utf-8"/>
-  <title>Bingo musical Spotify</title>
+  <title>Bingo musical Spotify (PKCE)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <style>
     body { font-family: system-ui, Arial; margin: 20px; }
-    button { padding: 10px 16px; margin: 8px 0; }
-    pre { background: #f5f5f5; padding: 10px; max-height: 200px; overflow:auto; }
-    .row { margin: 8px 0; }
+    label { display:block; margin:6px 0; }
+    input { width: 100%; max-width: 520px; padding:8px; }
+    button { padding: 10px 16px; margin: 8px 6px 8px 0; }
+    pre { background:#f5f5f5; padding:10px; max-height:240px; overflow:auto; }
   </style>
 </head>
 <body>
   <h1>Bingo musical</h1>
-  <div class="row">
-    <label>Client ID de Spotify: <input id="clientId" placeholder="tu_client_id" /></label>
-  </div>
-  <div class="row">
-    <label>Redirect URI: <input id="redirectUri" placeholder="https://tusitio.com/callback" /></label>
-  </div>
+
+  <label>Client ID de Spotify:
+    <input id="clientId" placeholder="tu_client_id">
+  </label>
+  <label>Redirect URI:
+    <input id="redirectUri" placeholder="https://tuusuario.github.io/tu-repo/">
+  </label>
   <button id="loginBtn">Iniciar sesión en Spotify</button>
-  <div class="row">
-    <label>Playlist ID (spotify:playlist:... o URL): <input id="playlistId" /></label>
+
+  <label>Playlist ID (spotify:playlist:... o URL):
+    <input id="playlistId" placeholder="https://open.spotify.com/playlist/XXXXXXXXXXXXXX">
+  </label>
+  <input type="file" id="segmentsCsv" accept=".csv"/>
+  <small>(Opcional) CSV con segmentos: track_id,start_sec,end_sec</small>
+  <div>
+    <button id="loadPlaylistBtn">Cargar playlist</button>
+    <button id="startBingoBtn">Empezar bingo</button>
+    <button id="downloadLogBtn">Descargar log (CSV)</button>
   </div>
-  <div class="row">
-    <input type="file" id="segmentsCsv" accept=".csv"/>
-    <small>(Opcional) CSV con segmentos: track_id,start_sec,end_sec</small>
-  </div>
-  <button id="loadPlaylistBtn">Cargar playlist</button>
-  <button id="startBingoBtn">Empezar bingo</button>
-  <button id="downloadLogBtn">Descargar log (CSV)</button>
 
   <pre id="log"></pre>
 
-  <!-- SDK de Spotify -->
-  https://sdk.scdn.co/spotify-player.js</script>
+  <script src="https://sdk.scdn.co/r.js"></script>
   <script>
+    // === CONFIGURA ESTOS DOS VALORES CON LOS TUYOS ===
+    const DEFAULT_CLIENT_ID = 'f19b2716d1bb46ba98f7ff7c5bf3656c';
+    const DEFAULT_REDIRECT_URI = 'https://jlmarest.github.io/Bingo-musical/';
+
+    // ======= Estado global =======
     let token = null;
+    let refreshToken = null;
+    let tokenExpiry = 0;
     let deviceId = null;
     let player = null;
-    let tracks = [];        // [{id, name, artists}]
-    let segments = {};      // {track_id: {start: s, end: s}}
-    let logRows = [];       // [{ts, track, artist, start, end}]
+    let tracks = [];
+    let segments = {};
+    let logRows = [];
 
-    function appendLog(msg) {
-      const el = document.getElementById('log');
-      el.textContent += msg + "\\n";
+    const SCOPES = [
+      'streaming',
+      'user-read-email',
+      'user-read-private',
+      'playlist-read-private',
+      'playlist-read-collaborative',
+      'user-modify-playback-state',
+      'user-read-playback-state'
+    ];
+
+    const logEl = document.getElementById('log');
+    function appendLog(msg) { logEl.textContent += msg + "\n"; }
+
+    // ==== Utilidades PKCE ====
+    function base64urlencode(arrayBuffer) {
+      let str = btoa(String.fromCharCode.apply(null, new Uint8Array(arrayBuffer)));
+      return str.replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+    }
+    async function sha256(plain) {
+      const enc = new TextEncoder().encode(plain);
+      const digest = await crypto.subtle.digest('SHA-256', enc);
+      return digest;
+    }
+    function randomString(len=64) {
+      const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
+      let out = '';
+      const arr = new Uint32Array(len);
+      crypto.getRandomValues(arr);
+      for (let i=0; i<len; i++) out += possible[arr[i] % possible.length];
+      return out;
     }
 
-    function parsePlaylistId(input) {
-      // Acepta URL de Spotify o ID
-      try {
-        if (input.includes("playlist")) {
-          const url = new URL(input);
-          const parts = url.pathname.split('/');
-          const idx = parts.findIndex(p => p === 'playlist');
-          if (idx >= 0 && parts[idx+1]) return parts[idx+1];
-        }
-      } catch {}
-      return input.trim();
+    // Guarda/lee estado en sessionStorage
+    function saveAuthState(obj) { sessionStorage.setItem('auth_state', JSON.stringify(obj)); }
+    function readAuthState() { try { return JSON.parse(sessionStorage.getItem('auth_state')||'{}'); } catch { return {} } }
+
+    async function ensureTokenValid() {
+      if (!token) return;
+      const now = Date.now();
+      if (now < tokenExpiry - 5000) return; // aún válido
+      if (!refreshToken) return;
+      // Refresh token
+      const clientId = getClientId();
+      const params = new URLSearchParams();
+      params.set('grant_type','refresh_token');
+      params.set('refresh_token', refreshToken);
+      params.set('client_id', clientId); // PKCE permite enviar client_id
+      const res = await fetch('https://accounts.spotify.com/api/token', {
+        method: 'POST',
+        headers: { 'Content-Type':'application/x-www-form-urlencoded' },
+        body: params.toString()
+      });
+      if (!res.ok) { appendLog('Error al refrescar token: '+res.status); return; }
+      const data = await res.json();
+      token = data.access_token;
+      tokenExpiry = Date.now() + (data.expires_in*1000);
+      saveAuthState({ token, refreshToken, tokenExpiry });
+      appendLog('Token renovado.');
     }
 
-    // OAuth implícito (simplificado) — en producción usa PKCE.
-    function login() {
-      const clientId = document.getElementById('clientId').value.trim();
-      const redirectUri = document.getElementById('redirectUri').value.trim();
-      const scopes = [
-        'streaming',
-        'user-read-email',
-        'user-read-private',
-        'playlist-read-private',
-        'playlist-read-collaborative',
-        'user-modify-playback-state',
-        'user-read-playback-state'
-      ].join(' ');
-      const url = 'https://accounts.spotify.com/authorize' +
-        `?client_id=${encodeURIComponent(clientId)}` +
-        `&response_type=token` +
-        `&redirect_uri=${encodeURIComponent(redirectUri)}` +
-        `&scope=${encodeURIComponent(scopes)}`;
-      window.location.href = url;
+    function getClientId() {
+      const v = document.getElementById('clientId').value.trim();
+      return v || DEFAULT_CLIENT_ID;
+    }
+    function getRedirectUri() {
+      const v = document.getElementById('redirectUri').value.trim();
+      return v || DEFAULT_REDIRECT_URI;
     }
 
-    // Recupera token del hash tras redirección
-    function readTokenFromHash() {
-      if (location.hash && location.hash.includes('access_token')) {
-        const params = new URLSearchParams(location.hash.slice(1));
-        token = params.get('access_token');
-        appendLog('Autenticado.');
+    // ==== Paso A: iniciar login con PKCE
+    async function startLogin() {
+      const clientId = getClientId();
+      const redirectUri = getRedirectUri();
+
+      // Generar verifier/challenge
+      const codeVerifier = randomString(64);
+      const codeChallenge = base64urlencode(await sha256(codeVerifier));
+      const state = randomString(16);
+
+      // Guardar en session para el intercambio
+      saveAuthState({ codeVerifier, state });
+
+      const params = new URLSearchParams({
+        client_id: clientId,
+        response_type: 'code',
+        redirect_uri: redirectUri,
+        code_challenge_method: 'S256',
+        code_challenge: codeChallenge,
+        scope: SCOPES.join(' '),
+        state
+      });
+
+      window.location = `https://accounts.spotify.com/authorize?${params.toString()}`;
+    }
+
+    // ==== Paso C: intercambio code -> token
+    async function handleRedirectBack() {
+      const url = new URL(window.location.href);
+      const code = url.searchParams.get('code');
+      const returnedState = url.searchParams.get('state');
+      const error = url.searchParams.get('error');
+      if (error) {
+        appendLog('Error OAuth: ' + error);
+        return;
       }
+      if (!code) return; // no venimos de OAuth
+
+      const { codeVerifier, state } = readAuthState();
+      if (!codeVerifier || returnedState !== state) {
+        appendLog('Estado OAuth inválido.');
+        return;
+      }
+
+      const clientId = getClientId();
+      const redirectUri = getRedirectUri();
+
+      const params = new URLSearchParams();
+      params.set('grant_type','authorization_code');
+      params.set('code', code);
+      params.set('redirect_uri', redirectUri);
+      params.set('client_id', clientId);
+      params.set('code_verifier', codeVerifier);
+
+      const res = await fetch('https://accounts.spotify.com/api/token', {
+        method: 'POST',
+        headers: { 'Content-Type':'application/x-www-form-urlencoded' },
+        body: params.toString()
+      });
+
+      if (!res.ok) {
+        appendLog('Error token endpoint: ' + res.status);
+        return;
+      }
+
+      const data = await res.json();
+      token = data.access_token;
+      refreshToken = data.refresh_token || null;
+      tokenExpiry = Date.now() + (data.expires_in*1000);
+      saveAuthState({ token, refreshToken, tokenExpiry });
+      appendLog('Autenticado.');
+
+      // Limpiar query (evitar repetir intercambio al refrescar)
+      history.replaceState({}, document.title, window.location.pathname);
     }
 
-    // Inicializa el Web Playback SDK
+    // ==== Spotify Web Playback SDK ====
     window.onSpotifyWebPlaybackSDKReady = () => {
       player = new Spotify.Player({
         name: 'Bingo musical',
-        getOAuthToken: cb => { cb(token); },
+        getOAuthToken: async cb => {
+          await ensureTokenValid();
+          cb(token);
+        },
         volume: 0.8
       });
 
       player.addListener('ready', ({ device_id }) => {
         deviceId = device_id;
-        appendLog('Dispositivo listo: ' + deviceId);
+        appendLog('Dispositivo listo: '+deviceId);
       });
-
-      player.addListener('initialization_error', ({ message }) => appendLog('Init error: ' + message));
-      player.addListener('authentication_error', ({ message }) => appendLog('Auth error: ' + message));
-      player.addListener('account_error', ({ message }) => appendLog('Account error: ' + message));
-      player.addListener('playback_error', ({ message }) => appendLog('Playback error: ' + message));
+      player.addListener('initialization_error', ({ message }) => appendLog('Init error: '+message));
+      player.addListener('authentication_error', ({ message }) => appendLog('Auth error: '+message));
+      player.addListener('account_error', ({ message }) => appendLog('Account error: '+message));
+      player.addListener('playback_error', ({ message }) => appendLog('Playback error: '+message));
 
       player.connect();
     };
 
-    async function spotifyApi(path, method='GET', body=null) {
-      const res = await fetch(`https://api.spotify.com/v1/${path}`, {
-        method,
-        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: body ? JSON.stringify(body) : null
-      });
-      if (!res.ok) throw new Error(`API ${path} => ${res.status}`);
+    async function api(path, method='GET', body=null) {
+      await ensureTokenValid();
+      const res = await fetch(
+        path.startsWith('http') ? path : `https://api.spotify.com/v1/${path}`,
+        {
+          method,
+          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: body ? JSON.stringify(body) : null
+        }
+      );
+      if (!res.ok) throw new Error(`${path} => ${res.status}`);
       return res.json();
     }
 
     async function transferPlayback() {
+      await ensureTokenValid();
       await fetch('https://api.spotify.com/v1/me/player', {
         method: 'PUT',
         headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -130,15 +244,32 @@
       });
     }
 
-    async function loadPlaylist() {
-      const playlistId = parsePlaylistId(document.getElementById('playlistId').value);
-      appendLog('Cargando playlist: ' + playlistId);
+    function parsePlaylistId(input) {
+      const v = (input||'').trim();
+      try {
+        if (v.includes('playlist')) {
+          const u = new URL(v);
+          const parts = u.pathname.split('/');
+          const idx = parts.findIndex(p => p === 'playlist');
+          if (idx>=0 && parts[idx+1]) return parts[idx+1];
+        }
+      } catch {}
+      return v;
+    }
 
-      // Paginación de pistas
+    async function loadPlaylist() {
+      if (!token) { appendLog('No estás autenticado.'); return; }
+      const pid = parsePlaylistId(document.getElementById('playlistId').value);
+      appendLog('Cargando playlist: ' + pid);
+
       tracks = [];
-      let url = `playlists/${playlistId}/tracks?fields=items(track(id,name,artists(name),uri)),next&limit=100`;
-      while (true) {
-        const data = await spotifyApi(url.replace('v1/', '')); // ruta completa si next viene con URL absoluta
+      // paginar
+      let url = `https://api.spotify.com/v1/playlists/${pid}/tracks?fields=items(track(id,name,artists(name),uri)),next&limit=100`;
+      while (url) {
+        await ensureTokenValid();
+        const res = await fetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
+        if (!res.ok) throw new Error(`API ${url} => ${res.status}`);
+        const data = await res.json();
         for (const item of data.items) {
           if (item.track && item.track.id) {
             tracks.push({
@@ -149,108 +280,99 @@
             });
           }
         }
-        if (!data.next) break;
         url = data.next;
       }
       appendLog(`Total pistas: ${tracks.length}`);
 
-      // Leer CSV de segmentos (opcional)
+      // CSV opcional
       const file = document.getElementById('segmentsCsv').files[0];
+      segments = {};
       if (file) {
         const text = await file.text();
-        segments = {};
-        for (const line of text.split(/\\r?\\n/)) {
+        for (const line of text.split(/\r?\n/)) {
           const [tid, start, end] = line.split(',');
-          if (tid && start && end) {
-            segments[tid.trim()] = { start: +start, end: +end };
-          }
+          if (tid && start && end) segments[tid.trim()] = { start:+start, end:+end };
         }
         appendLog(`Segmentos cargados: ${Object.keys(segments).length}`);
+      } else {
+        appendLog('Sin CSV: se usarán fragmentos simulados (15s desde 45s).');
       }
 
       await transferPlayback();
       appendLog('Playback transferido al Web Player.');
     }
 
-    function shuffleArray(arr) {
-      const a = arr.slice();
-      for (let i = a.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [a[i], a[j]] = [a[j], a[i]];
-      }
-      return a;
-    }
+    function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
 
-    async function playTrackUri(uri) {
+    async function playTrackUri(uri){ 
+      await ensureTokenValid();
       await fetch(`https://api.spotify.com/v1/me/player/play?device_id=${deviceId}`, {
-        method: 'PUT',
-        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ uris: [uri] })
+        method:'PUT',
+        headers:{ 'Authorization': `Bearer ${token}`, 'Content-Type':'application/json' },
+        body: JSON.stringify({ uris:[uri] })
       });
     }
 
-    async function seekPosition(ms) {
+    async function seekPosition(ms){
+      await ensureTokenValid();
       await fetch(`https://api.spotify.com/v1/me/player/seek?position_ms=${ms}&device_id=${deviceId}`, {
-        method: 'PUT',
-        headers: { 'Authorization': `Bearer ${token}` }
+        method:'PUT',
+        headers:{ 'Authorization': `Bearer ${token}` }
       });
     }
 
-    function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+    function shuffle(a){
+      const r = a.slice();
+      for (let i=r.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [r[i],r[j]]=[r[j],r[i]]; }
+      return r;
+    }
 
     async function startBingo() {
       if (!tracks.length) { appendLog('No hay pistas cargadas.'); return; }
-      const order = shuffleArray(tracks);
+      const order = shuffle(tracks);
 
       for (const t of order) {
-        const seg = segments[t.id] || null;
-        const startSec = seg ? seg.start : 0;
-        const endSec = seg ? seg.end : Math.min(startSec + 20, startSec + 9999); // por defecto 20s
+        const seg = segments[t.id] || { start:45, end:60 }; // simulación: 15s desde 00:45
+        const startSec = seg.start, endSec = seg.end;
 
-        appendLog(`▶ ${t.name} — ${t.artists}  [${startSec}s → ${endSec}s]`);
+        appendLog(`▶ ${t.name} — ${t.artists} [${startSec}s → ${endSec}s]`);
         await playTrackUri(t.uri);
-        await sleep(800); // pequeño margen para cargar
-        await seekPosition(startSec * 1000);
+        await sleep(900);
+        await seekPosition(startSec*1000);
 
-        const durationMs = (endSec - startSec) * 1000;
-        await sleep(durationMs);
-
-        // pausar al final del fragmento
+        await sleep((endSec-startSec)*1000);
+        await ensureTokenValid();
         await fetch(`https://api.spotify.com/v1/me/player/pause?device_id=${deviceId}`, {
-          method: 'PUT',
-          headers: { 'Authorization': `Bearer ${token}` }
+          method:'PUT',
+          headers:{ 'Authorization': `Bearer ${token}` }
         });
 
-        logRows.push({
-          ts: new Date().toISOString(),
-          track: t.name,
-          artist: t.artists,
-          start: startSec,
-          end: endSec
-        });
+        logRows.push({ ts:new Date().toISOString(), track:t.name, artist:t.artists, start:startSec, end:endSec });
       }
-
       appendLog('Bingo completado.');
     }
 
-    function downloadLogCsv() {
-      const header = 'timestamp,track,artist,start_sec,end_sec\\n';
-      const rows = logRows.map(r => `${r.ts},"${r.track.replace(/"/g,'""')}","${r.artist.replace(/"/g,'""')}",${r.start},${r.end}`).join('\\n');
-      const blob = new Blob([header + rows], { type: 'text/csv;charset=utf-8;' });
+    function downloadLogCsv(){
+      const header='timestamp,track,artist,start_sec,end_sec\n';
+      const rows = logRows.map(r => `${r.ts},"${r.track.replace(/"/g,'""')}","${r.artist.replace(/"/g,'""')}",${r.start},${r.end}`).join('\n');
+      const blob = new Blob([header+rows], { type:'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url; a.download = 'bingo_log.csv'; a.click();
+      const a = document.createElement('a'); a.href=url; a.download='bingo_log.csv'; a.click();
       URL.revokeObjectURL(url);
     }
 
-    // Eventos UI
-    document.getElementById('loginBtn').onclick = login;
-    document.getElementById('loadPlaylistBtn').onclick = () => { readTokenFromHash(); loadPlaylist().catch(e => appendLog(e.message)); };
-    document.getElementById('startBingoBtn').onclick = () => { startBingo().catch(e => appendLog(e.message)); };
+    // Eventos
+    document.getElementById('loginBtn').onclick = startLogin;
+    document.getElementById('loadPlaylistBtn').onclick = () => loadPlaylist().catch(e => appendLog(e.message));
+    document.getElementById('startBingoBtn').onclick = () => startBingo().catch(e => appendLog(e.message));
     document.getElementById('downloadLogBtn').onclick = downloadLogCsv;
 
-    // Si ya has vuelto del OAuth
-    readTokenFromHash();
+    // Pre-rellenar campos
+    document.getElementById('clientId').value = DEFAULT_CLIENT_ID;
+    document.getElementById('redirectUri').value = DEFAULT_REDIRECT_URI;
+
+    // Si venimos del OAuth, canjear code
+    handleRedirectBack().catch(e => appendLog(e.message));
   </script>
 </body>
 </html>
