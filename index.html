@@ -33,6 +33,9 @@
     <button id="loadPlaylistBtn">Cargar playlist</button>
     <button id="startBingoBtn">Empezar bingo</button>
     <button id="downloadLogBtn">Descargar log (CSV)</button>
+    <button id="activateAudioBtn">Activar audio (si no suena)</button>
+    <button id="useThisDeviceBtn">Usar este dispositivo</button>
+    <button id="listarDevicesBtn">Listar dispositivos</button>
   </div>
 
   <pre id="log"></pre>
@@ -221,17 +224,34 @@
       player.connect();
       
       // justo después de que el SDK diga "ready"
+
       player.addListener('ready', async ({ device_id }) => {
         deviceId = device_id;
         appendLog('Dispositivo listo: ' + deviceId);
 
-        // Activa el Web Player y permite autoplay
-        await transferPlayback(true);
-
-        // (Opcional) intenta reproducir 1 segundo de silencio via resume (algunas versiones lo requieren)
-        try { await player.resume(); } catch (e) { /* ignora si no procede */ }
+        
+      player.addListener('player_state_changed', (state) => {
+        if (!state) { appendLog('Estado: null (SDK no activo)'); return; }
+        const t = state.track_window.current_track;
+        appendLog(`Estado: ${state.paused ? 'Pausa':'Reproduciendo'} — ${t?.name || '(sin pista)'}`);
       });
 
+        // Intenta activar audio y seleccionar el dispositivo desde el principio
+        try {
+          if (player.activateElement) { await player.activateElement(); }
+          await player.setVolume(1.0);
+        } catch {}
+
+        await transferPlayback(true);   // muy importante: play:true
+        appendLog('Playback transferido al Web Player (SDK).');
+
+        // Diagnóstico: lista dispositivos
+        try {
+          const data = await api('me/player/devices');
+          const resumen = data.devices.map(d => `${d.name} [${d.type}] activo=${d.is_active}`).join(' | ');
+          appendLog('Dispositivos vistos: ' + resumen);
+        } catch {}
+      });
     };
 
     async function api(path, method='GET', body=null) {
@@ -325,30 +345,35 @@
 
     async function tryFetch(url, options, retries=3, backoff=500) {
       for (let i=0; i<retries; i++) {
-        const res = await fetch(url, options);
-        if (res.ok) return res;
-        appendLog(`Fetch fallo (${res.status}) en ${url}, intento ${i+1}/${retries}`);
+        try {
+          const res = await fetch(url, options);
+          if (res.ok) return res;
+          appendLog(`Fetch fallo (${res.status}) en ${url}, intento ${i+1}/${retries}`);
+        } catch (e) {
+          appendLog(`Fetch error en ${url}: ${e.message} (intento ${i+1}/${retries})`);
+        }
         await sleep(backoff * (i+1));
       }
-      throw new Error('Failed to fetch '+url);
+      throw new Error('Failed to fetch: ' + url);
     }
 
-    async function playTrackUri(uri) {
+    async function playTrackUri(uri, useDevice=true) {
       await ensureTokenValid();
-      await tryFetch(`https://api.spotify.com/v1/me/player/play?device_id=${deviceId}`, {
+      const qp = (useDevice && deviceId) ? `?device_id=${deviceId}` : '';
+      await tryFetch(`https://api.spotify.com/v1/me/player/play${qp}`, {
         method: 'PUT',
         headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ uris: [uri] })
       }, 3, 500);
     }
 
-
-    async function seekPosition(ms){
+    async function seekPosition(ms, useDevice=true) {
       await ensureTokenValid();
-      await fetch(`https://api.spotify.com/v1/me/player/seek?position_ms=${ms}&device_id=${deviceId}`, {
-        method:'PUT',
-        headers:{ 'Authorization': `Bearer ${token}` }
-      });
+      const qp = (useDevice && deviceId) ? `&device_id=${deviceId}` : '';
+      await tryFetch(`https://api.spotify.com/v1/me/player/seek?position_ms=${ms}${qp}`, {
+        method: 'PUT',
+        headers: { 'Authorization': `Bearer ${token}` }
+      }, 2, 500);
     }
 
     function shuffle(a){
@@ -360,6 +385,17 @@
     async function startBingo() {
       if (!tracks.length) { appendLog('No hay pistas cargadas.'); return; }
       const order = shuffle(tracks);
+      
+      // ¿Está activo el SDK?
+      let activeIsSDK = false;
+      try {
+        const state = await player.getCurrentState();
+        activeIsSDK = !!state;  // si es null, el SDK no es el activo
+      } catch {}
+
+      // Si no está activo, no pases device_id y controla el dispositivo activo (p.ej., Web Player oficial)
+      appendLog('Usando destino: ' + (activeIsSDK ? 'SDK (Bingo musical)' : 'dispositivo activo de Spotify'));
+
 
       for (const t of order) {
         const seg = segments[t.id] || { start:45, end:60 }; // simulación: 15s desde 00:45
@@ -401,10 +437,36 @@
     // Pre-rellenar campos
     document.getElementById('clientId').value = DEFAULT_CLIENT_ID;
     document.getElementById('redirectUri').value = DEFAULT_REDIRECT_URI;
+    
+    document.getElementById('activateAudioBtn').onclick = async () => {
+      try {
+        // Desbloquea el audio por política de autoplay
+        if (player && player.activateElement) {
+          await player.activateElement();
+        }
+        await player.setVolume(1.0);
+        appendLog('Audio activado y volumen al 100%.');
+      } catch(e) {
+        appendLog('activateElement/setVolume error: ' + e.message);
+      }
+    };
+
+    document.getElementById('useThisDeviceBtn').onclick = async () => {
+      await transferPlayback(true);  // play:true para “despertar” el dispositivo
+      appendLog('Este dispositivo fijado como destino.');
+    };
+
+    document.getElementById('listarDevicesBtn').onclick = async () => {
+      const data = await api('me/player/devices');
+      const resumen = data.devices.map(d => `${d.name} [${d.type}] activo=${d.is_active} (id=${d.id})`).join(' | ');
+      appendLog('Dispositivos: ' + resumen);
+    };
+
 
     // Si venimos del OAuth, canjear code
     handleRedirectBack().catch(e => appendLog(e.message));
   </script>
 </body>
 </html>
+
 
