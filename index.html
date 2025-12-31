@@ -259,34 +259,28 @@
 
     // Elige el mejor dispositivo disponible: primero SDK (si existiera),
     // si no, Web Player (Chrome/Edge), si no, cualquiera activo; si no, el primero.
+
     async function chooseBestDevice() {
       await ensureTokenValid();
       const data = await api('me/player/devices');
       const devices = data.devices || [];
 
-      // 1) Preferir el dispositivo del SDK (si llegara a existir)
+      // 1) Intentar SDK por nombre (si algún día aparece)
       let d = devices.find(x => x.name === PLAYER_NAME);
 
-      // 2) Si no hay SDK, preferir Web Player del navegador
-      if (!d) {
-        d = devices.find(x => /Web Player/i.test(x.name)); // Chrome o Edge
-      }
+      // 2) Si no, preferir Web Player (Chrome/Edge)
+      if (!d) d = devices.find(x => /Web Player/i.test(x.name));
 
-      // 3) Si no hay Web Player, elegir uno activo
-      if (!d) {
-        d = devices.find(x => x.is_active);
-      }
+      // 3) Si no, cualquier activo
+      if (!d) d = devices.find(x => x.is_active);
 
-      // 4) Si no hay ninguno activo, elegir el primero disponible
-      if (!d) {
-        d = devices[0];
-      }
+      // 4) Si no, el primero disponible
+      if (!d) d = devices[0];
 
       if (!d) {
         appendLog('No hay dispositivos disponibles en tu cuenta.');
         return false;
       }
-
       deviceId = d.id;
       appendLog(`Destino elegido: ${d.name} [${d.type}] activo=${d.is_active} (id=${d.id})`);
       return true;
@@ -294,34 +288,28 @@
 
     async function transferPlayback(playNow = false) {
       await ensureTokenValid();
-
-      // Si no tenemos deviceId, elegimos uno (idealmente el Web Player)
       if (!deviceId) {
         const ok = await chooseBestDevice();
         if (!ok) { appendLog('Transfer cancelado: sin deviceId.'); return; }
       }
-
       const res = await fetch('https://api.spotify.com/v1/me/player', {
         method: 'PUT',
         headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ device_ids: [deviceId], play: !!playNow })
       });
-
-      if (res.ok) {
-        appendLog('Playback transferido al dispositivo elegido.');
-      } else {
-        appendLog('Transfer playback error: ' + res.status);
-      }
+      if (res.ok) appendLog('Playback transferido al dispositivo elegido.');
+      else appendLog('Transfer playback error: ' + res.status);
     }
+
 
 
     async function isSdkActive(){
       try { const st = await player.getCurrentState(); return !!st; } catch { return false; }
     }
 
+
     async function playTrackUri(uri) {
       await ensureTokenValid();
-      // Asegurar que tenemos destino y que está activo
       if (!deviceId) { const ok = await chooseBestDevice(); if (!ok) return; }
       await tryFetch(`https://api.spotify.com/v1/me/player/play?device_id=${deviceId}`, {
         method: 'PUT',
@@ -339,23 +327,39 @@
       }, 2, 500);
     }
 
-    function parsePlaylistId(input){
-      const v = (input||'').trim();
-      try{
-        if (v.includes('playlist')){
+
+
+    function parsePlaylistId(input) {
+      const v = (input || '').trim();
+      if (!v) return '';
+      try {
+        // Caso URL: https://open.spotify.com/playlist/<ID>?...
+        if (v.includes('open.spotify.com/playlist/')) {
           const u = new URL(v);
           const parts = u.pathname.split('/');
-          const idx = parts.findIndex(p => p==='playlist');
-          if (idx>=0 && parts[idx+1]) return parts[idx+1];
+          const idx = parts.findIndex(p => p === 'playlist');
+          if (idx >= 0 && parts[idx + 1]) return parts[idx + 1];
+          return '';
         }
-      }catch{}
+        // Caso URI: spotify:playlist:<ID>
+        if (v.startsWith('spotify:playlist:')) {
+          return v.split(':')[2] || '';
+        }
+      } catch (e) {
+        // Si no es URL válida, caeremos a "ID simple"
+      }
+      // Caso ID simple
       return v;
     }
 
-    async function loadPlaylist(){
-      if (!token){ appendLog('No estás autenticado.'); return; }
-      tracks = [];
+
+    async function loadPlaylist(){     
+      if (!token) { appendLog('No estás autenticado.'); return; }
+
       const pid = parsePlaylistId(document.getElementById('playlistId').value);
+      if (!pid) { appendLog('Playlist ID vacío o inválido.'); return; }
+
+      tracks = [];
       appendLog('Cargando playlist: ' + pid);
 
       let url = `https://api.spotify.com/v1/playlists/${pid}/tracks?fields=items(track(id,name,artists(name),uri)),next&limit=100`;
@@ -418,7 +422,8 @@
         const useSDK = await isSdkActive() && !!deviceId;
 
         const pauseUrl = `https://api.spotify.com/v1/me/player/pause?device_id=${deviceId}`;
-        await tryFetch(pauseUrl, { method: 'PUT', headers: { 'Authorization': `Bearer ${token}` } }, 2, 500);
+        await tryFetch(pauseUrl, { method:'PUT', headers:{ 'Authorization': `Bearer ${token}` } }, 2, 500);
+
 
 
         logRows.push({ ts:new Date().toISOString(), track:t.name, artist:t.artists, start:startSec, end:endSec });
@@ -462,4 +467,5 @@
   <script src="https://sdk.scdn.co/r.js</script>
 </body>
 </html>
+
 
