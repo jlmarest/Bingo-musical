@@ -393,53 +393,88 @@
       return v;
     }
 
-
-    async function loadPlaylist(){     
+    // Normaliza una celda CSV: quita BOM, comillas y espacios
+    function normalizeCell(s) {
+      if (!s) return '';
+      return s
+        .replace(/^\uFEFF/, '')      // BOM
+        .replace(/^"+|"+$/g, '')     // comillas al inicio/fin
+        .trim();
+    }
+    
+    async function loadPlaylist() {
       if (!token) { appendLog('No estás autenticado.'); return; }
-
+    
       const pid = parsePlaylistId(document.getElementById('playlistId').value);
       if (!pid) { appendLog('Playlist ID vacío o inválido.'); return; }
-
+    
       tracks = [];
       appendLog('Cargando playlist: ' + pid);
-
-      //let url = `https://api.spotify.com/v1/playlists/${pid}/tracks?fields=items(track(id,name,artists(name),uri)),next&limit=100`;
+    
+      // OJO: duration_ms para generar y validar segmentos
       let url = `https://api.spotify.com/v1/playlists/${pid}/tracks?fields=items(track(id,name,artists(name),uri,duration_ms)),next&limit=100`;
-      while (url){
+      while (url) {
         await ensureTokenValid();
-        const res = await fetch(url, { headers:{ 'Authorization': `Bearer ${token}` } });
+        const res = await fetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
         if (!res.ok) throw new Error(`API ${url} => ${res.status}`);
         const data = await res.json();
-        for (const item of data.items){
-          if (item.track && item.track.id){
+        for (const item of data.items) {
+          const t = item.track;
+          if (t && t.id) {
             tracks.push({
-              id: item.track.id,
-              name: item.track.name,
-              artists: item.track.artists.map(a=>a.name).join(', '),
-              uri: `spotify:track:${item.track.id}`,
-              duration_ms: item.track.duration_ms || null
+              id: t.id,
+              name: t.name,
+              artists: (t.artists || []).map(a => a.name).join(', '),
+              uri: `spotify:track:${t.id}`,
+              duration_ms: t.duration_ms || null
             });
           }
         }
         url = data.next;
       }
       appendLog(`Total pistas: ${tracks.length}`);
-
-      const file = document.getElementById('segmentsCsv').files[0];
+    
+      // === Leer CSV de segmentos (opcional) ===
       segments = {};
-      if (file){
+      const file = document.getElementById('segmentsCsv').files?.[0];
+      if (file) {
         const text = await file.text();
-        for (const line of text.split(/\r?\n/)){
-          const [tid, start, end] = line.split(',');
-          if (tid && start && end) segments[tid.trim()] = { start:+start, end:+end };
+        const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
+    
+        // Detectar encabezado
+        let startIdx = 0;
+        const header = lines[0].split(',').map(normalizeCell);
+        const hasHeader = header[0].toLowerCase() === 'track_id';
+        if (hasHeader) startIdx = 1;
+    
+        let totalCsvRows = 0;
+        for (let i = startIdx; i < lines.length; i++) {
+          const cols = lines[i].split(',').map(normalizeCell);
+          const [tid, start, end] = cols;
+          if (!tid || !start || !end) continue;
+          const startNum = Number(start);
+          const endNum = Number(end);
+          if (!Number.isFinite(startNum) || !Number.isFinite(endNum)) continue;
+          segments[tid] = { start: startNum, end: endNum };
+          totalCsvRows++;
         }
-        appendLog(`Segmentos cargados: ${Object.keys(segments).length}`);
-      }else{
+    
+        // Diagnóstico: cuántos segmentos del CSV aplican a pistas cargadas
+        const trackIds = new Set(tracks.map(t => t.id));
+        const matched = Object.keys(segments).filter(id => trackIds.has(id)).length;
+    
+        appendLog(`Segmentos CSV: ${totalCsvRows} filas; coinciden con playlist: ${matched}`);
+        if (matched === 0) {
+          appendLog('⚠ Ningún track_id del CSV coincide. Comprueba que el CSV usa IDs como "3n3Ppam7..." y no URLs.');
+        }
+      } else {
         appendLog('Sin CSV: se usarán fragmentos simulados (15s desde 45s).');
       }
-
+    
+      // Activa/elige dispositivo destino
       await transferPlayback(true);
     }
+
 
     function shuffle(a){
       const r = a.slice();
@@ -615,6 +650,7 @@
   <script src="https://sdk.scdn.co/r.js</script>
 </body>
 </html>
+
 
 
 
