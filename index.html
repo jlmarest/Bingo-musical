@@ -33,6 +33,7 @@
   <div>
     <button id="loadPlaylistBtn">Cargar playlist</button>
     <button id="genCsvBtn">Generar CSV de segmentos (aleatorio)</button>
+    <button id="validarCsvBtn">Validar segmentos CSV</button>
   </div>
   <div>
     <button id="startBingoBtn">Empezar bingo</button>
@@ -603,6 +604,18 @@
         rows.push(`${t.id},${start},${end}`);
       }
 
+      
+      document.getElementById('validarCsvBtn').onclick = () => {
+        if (!tracks?.length) { appendLog('Carga primero la playlist.'); return; }
+        const trackIds = new Set(tracks.map(t => t.id));
+        const segIds = Object.keys(segments);
+        const matched = segIds.filter(id => trackIds.has(id));
+        const missing = tracks.filter(t => !segments[t.id]).map(t => t.id);
+        appendLog(`CSV: ${segIds.length} segmentos; coinciden: ${matched.length}; sin segmento: ${missing.length}`);
+        if (missing.length) appendLog(`IDs sin segmento: ${missing.slice(0,10).join(', ')}...`);
+      };
+
+
   const csv = 'track_id,start_sec,end_sec\n' + rows.join('\n');
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
@@ -650,6 +663,7 @@
   <script src="https://sdk.scdn.co/r.js</script>
 </body>
 </html>
+
 
 
 
