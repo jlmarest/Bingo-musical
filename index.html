@@ -33,6 +33,8 @@
   <div>
     <button id="loadPlaylistBtn">Cargar playlist</button>
     <button id="startBingoBtn">Empezar bingo</button>
+    <button id="pauseBingoBtn">Pausar bingo</button>
+    <button id="resumeBingoBtn">Reanudar bingo</button>
     <button id="downloadLogBtn">Descargar log (CSV)</button>
   </div>
 
@@ -40,6 +42,7 @@
     <button id="activateAudioBtn">Activar audio (si no suena)</button>
     <button id="useThisDeviceBtn">Usar este dispositivo</button>
     <button id="listarDevicesBtn">Listar dispositivos</button>
+    <button id="stopBingoBtn">Detener bingo</button>
   </div>
 
   <pre id="log"></pre>
@@ -63,6 +66,15 @@
     let tracks = [];
     let segments = {};
     let logRows = [];
+    
+    // Estado del bingo para pausar/reanudar
+    let bingoRunning = false;
+    let bingoPaused = false;
+    let currentTrack = null;           // { id, name, artists, uri }
+    let currentSeg = null;             // { start, end }
+    let remainingMs = 0;               // milisegundos que faltan del fragmento en curso
+    let pauseStartedAt = null;         // timestamp cuando pausamos
+    
 
     const SCOPES = [
       'streaming',
@@ -328,6 +340,30 @@
     }
 
 
+    function sleepPausable(ms) {
+      return new Promise(async (resolve) => {
+        let elapsed = 0;
+        const step = 200; // chequeo cada 200 ms
+        while (elapsed < ms) {
+          if (bingoPaused) {
+            // Esperar hasta que se reanude
+            await new Promise(r => {
+              const check = () => {
+                if (!bingoPaused) r();
+                else setTimeout(check, 200);
+              };
+              check();
+            });
+          }
+          const chunk = Math.min(step, ms - elapsed);
+          await sleep(chunk);
+          elapsed += chunk;
+          remainingMs = ms - elapsed;
+        }
+        resolve();
+      });
+    }
+
 
     function parsePlaylistId(input) {
       const v = (input || '').trim();
@@ -404,32 +440,50 @@
       return r;
     }
 
+
     async function startBingo(){
       if (!tracks.length){ appendLog('No hay pistas cargadas.'); return; }
+      bingoRunning = true;
+      bingoPaused = false;
+    
       const order = shuffle(tracks);
-
+    
       for (const t of order){
-        const seg = segments[t.id] || { start:45, end:60 }; // 15s desde 00:45
+        // Si venimos de una reanudación y currentTrack coincide, reutiliza currentSeg/remainingMs
+        currentTrack = t;
+        const seg = segments[t.id] || { start:45, end:60 }; // 15s por defecto
+        currentSeg = seg;
+    
         const startSec = seg.start, endSec = seg.end;
-
+        const durationMs = (endSec - startSec) * 1000;
+    
         appendLog(`▶ ${t.name} — ${t.artists} [${startSec}s → ${endSec}s]`);
+    
+        // Play en el dispositivo elegido
         await playTrackUri(t.uri);
         await sleep(1200);
         await seekPosition(startSec * 1000);
-
-        await sleep((endSec - startSec) * 1000);
-
-        const useSDK = await isSdkActive() && !!deviceId;
-
+    
+        // Reproducir fragmento (pausable)
+        remainingMs = durationMs;
+        await sleepPausable(durationMs);
+    
+        // Pausa al final del fragmento
         const pauseUrl = `https://api.spotify.com/v1/me/player/pause?device_id=${deviceId}`;
         await tryFetch(pauseUrl, { method:'PUT', headers:{ 'Authorization': `Bearer ${token}` } }, 2, 500);
-
-
-
+    
+        // Registrar log
         logRows.push({ ts:new Date().toISOString(), track:t.name, artist:t.artists, start:startSec, end:endSec });
+    
+        // Si el usuario ha pulsado “Pausar” y desea detener el bingo por completo, sal
+        if (!bingoRunning) {
+          appendLog('Bingo detenido.');
+          return;
+        }
       }
       appendLog('Bingo completado.');
     }
+
 
     function downloadLogCsv(){
       const header = 'timestamp,track,artist,start_sec,end_sec\n';
@@ -446,6 +500,60 @@
     document.getElementById('loginBtn').onclick = startLogin;
     document.getElementById('loadPlaylistBtn').onclick = () => loadPlaylist().catch(e => appendLog(e.message));
     document.getElementById('startBingoBtn').onclick = () => startBingo().catch(e => appendLog(e.message));
+
+    document.getElementById('pauseBingoBtn').onclick = async () => {
+      if (!bingoRunning) { appendLog('El bingo no está en ejecución.'); return; }
+      bingoPaused = true;
+      pauseStartedAt = Date.now();
+    
+      if (deviceId) {
+        const pauseUrl = `https://api.spotify.com/v1/me/player/pause?device_id=${deviceId}`;
+        await tryFetch(pauseUrl, { method:'PUT', headers:{ 'Authorization': `Bearer ${token}` } }, 2, 500);
+      }
+      appendLog('Bingo en pausa.');
+    };
+
+    document.getElementById('resumeBingoBtn').onclick = async () => {
+      if (!bingoRunning) { appendLog('El bingo no está en ejecución.'); return; }
+      if (!currentTrack || !currentSeg) { appendLog('No hay pista activa para reanudar.'); return; }
+    
+      // Calcular dónde retomar
+      const segEndMs = currentSeg.end * 1000;
+      let resumeMs = Math.max(0, segEndMs - remainingMs);
+    
+      // Si por cualquier motivo remainingMs no está bien, cae al inicio del segmento
+      if (!Number.isFinite(resumeMs)) resumeMs = currentSeg.start * 1000;
+    
+      // Transferir/activar el dispositivo y retomar
+      await transferPlayback(true);
+      await playTrackUri(currentTrack.uri);
+      await sleep(600);
+      await seekPosition(resumeMs);
+    
+      bingoPaused = false;
+      appendLog(`Reanudado: ${currentTrack.name} en ${(resumeMs/1000).toFixed(1)}s`);
+    };
+
+    document.getElementById('stopBingoBtn').onclick = async () => {
+      if (!bingoRunning) { appendLog('El bingo ya está detenido.'); return; }
+      bingoRunning = false;
+      bingoPaused = false;
+    
+      // Pausa la reproducción por si quedaba algo sonando
+      if (deviceId) {
+        const pauseUrl = `https://api.spotify.com/v1/me/player/pause?device_id=${deviceId}`;
+        await tryFetch(pauseUrl, { method:'PUT', headers:{ 'Authorization': `Bearer ${token}` } }, 2, 500);
+      }
+    
+      // Limpia estado
+      currentTrack = null;
+      currentSeg = null;
+      remainingMs = 0;
+      pauseStartedAt = null;
+    
+      appendLog('Bingo detenido y reseteado.');
+    };
+
     document.getElementById('downloadLogBtn').onclick = downloadLogCsv;
 
     document.getElementById('activateAudioBtn').onclick = async () => {
@@ -467,5 +575,6 @@
   <script src="https://sdk.scdn.co/r.js</script>
 </body>
 </html>
+
 
 
